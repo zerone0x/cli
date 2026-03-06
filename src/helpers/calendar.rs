@@ -200,36 +200,41 @@ async fn handle_agenda(matches: &ArgMatches) -> Result<(), GwsError> {
         .map(|s| crate::formatter::OutputFormat::from_str(s))
         .unwrap_or(crate::formatter::OutputFormat::Table);
 
-    // Determine time range
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    // Determine time range using local timezone for day boundaries
+    use chrono::{Local, Duration, NaiveTime};
 
-    let days: u64 = if matches.get_flag("tomorrow") {
-        // Start from tomorrow, 1 day
-        1
+    let local_now = Local::now();
+
+    let (time_min, time_max) = if matches.get_flag("today") {
+        // Today: start of local day to end of local day
+        let start_of_today = local_now
+            .date_naive()
+            .and_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
+            .and_local_timezone(local_now.timezone())
+            .unwrap();
+        let end_of_today = start_of_today + Duration::days(1);
+        (start_of_today.to_rfc3339(), end_of_today.to_rfc3339())
+    } else if matches.get_flag("tomorrow") {
+        // Tomorrow: start of tomorrow to end of tomorrow (local timezone)
+        let start_of_tomorrow = (local_now + Duration::days(1))
+            .date_naive()
+            .and_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
+            .and_local_timezone(local_now.timezone())
+            .unwrap();
+        let end_of_tomorrow = start_of_tomorrow + Duration::days(1);
+        (start_of_tomorrow.to_rfc3339(), end_of_tomorrow.to_rfc3339())
     } else if matches.get_flag("week") {
-        7
+        // This week: from now to 7 days ahead
+        let end = local_now + Duration::days(7);
+        (local_now.to_rfc3339(), end.to_rfc3339())
     } else {
-        matches
+        let days: i64 = matches
             .get_one::<String>("days")
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(1)
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(1);
+        let end = local_now + Duration::days(days);
+        (local_now.to_rfc3339(), end.to_rfc3339())
     };
-
-    let (time_min_epoch, time_max_epoch) = if matches.get_flag("tomorrow") {
-        // Tomorrow: start of tomorrow to end of tomorrow
-        let day_seconds = 86400;
-        let tomorrow_start = (now / day_seconds + 1) * day_seconds;
-        (tomorrow_start, tomorrow_start + day_seconds)
-    } else {
-        // Start from now
-        (now, now + days * 86400)
-    };
-
-    let time_min = epoch_to_rfc3339(time_min_epoch);
-    let time_max = epoch_to_rfc3339(time_max_epoch);
 
     let client = crate::client::build_client()?;
     let calendar_filter = matches.get_one::<String>("calendar");
@@ -393,11 +398,6 @@ async fn handle_agenda(matches: &ArgMatches) -> Result<(), GwsError> {
         crate::formatter::format_value(&output, &output_format)
     );
     Ok(())
-}
-
-fn epoch_to_rfc3339(epoch: u64) -> String {
-    use chrono::{TimeZone, Utc};
-    Utc.timestamp_opt(epoch as i64, 0).unwrap().to_rfc3339()
 }
 
 fn build_insert_request(
