@@ -248,25 +248,30 @@ pub(super) async fn handle_subscribe(
         };
 
     // Pull loop
-    let result = pull_loop(&client, &pubsub_token, &pubsub_subscription, config.clone()).await;
+    let result = pull_loop(&client, &pubsub_subscription, config.clone()).await;
 
     // On exit, print reconnection info or cleanup
     if created_resources {
         if config.cleanup {
             eprintln!("\nCleaning up Pub/Sub resources...");
+            // Refresh the token for cleanup — the original may have expired
+            // during the long-running pull loop.
+            let cleanup_token = auth::get_token(&[PUBSUB_SCOPE])
+                .await
+                .unwrap_or_default();
             // Delete Pub/Sub subscription
             let _ = client
                 .delete(format!(
                     "https://pubsub.googleapis.com/v1/{pubsub_subscription}"
                 ))
-                .bearer_auth(&pubsub_token)
+                .bearer_auth(&cleanup_token)
                 .send()
                 .await;
             // Delete Pub/Sub topic
             if let Some(ref topic) = topic_name {
                 let _ = client
                     .delete(format!("https://pubsub.googleapis.com/v1/{topic}"))
-                    .bearer_auth(&pubsub_token)
+                    .bearer_auth(&cleanup_token)
                     .send()
                     .await;
             }
@@ -301,12 +306,18 @@ pub(super) async fn handle_subscribe(
 /// Pulls messages from a Pub/Sub subscription in a loop.
 async fn pull_loop(
     client: &reqwest::Client,
-    token: &str,
     subscription: &str,
     config: SubscribeConfig,
 ) -> Result<(), GwsError> {
     let mut file_counter: u64 = 0;
     loop {
+        // Refresh token on each iteration to avoid expiry after ~1 hour.
+        // `get_token` uses cached credentials and only contacts the OAuth server
+        // when the current access token is expired, so this is inexpensive.
+        let token = auth::get_token(&[PUBSUB_SCOPE])
+            .await
+            .map_err(|e| GwsError::Auth(format!("Failed to refresh Pub/Sub token: {e}")))?;
+
         let pull_body = json!({
             "maxMessages": config.max_messages,
         });
@@ -315,7 +326,7 @@ async fn pull_loop(
             .post(format!(
                 "https://pubsub.googleapis.com/v1/{subscription}:pull"
             ))
-            .bearer_auth(token)
+            .bearer_auth(&token)
             .header("Content-Type", "application/json")
             .json(&pull_body)
             .timeout(std::time::Duration::from_secs(config.poll_interval.max(10)))
@@ -382,7 +393,7 @@ async fn pull_loop(
                 .post(format!(
                     "https://pubsub.googleapis.com/v1/{subscription}:acknowledge"
                 ))
-                .bearer_auth(token)
+                .bearer_auth(&token)
                 .header("Content-Type", "application/json")
                 .json(&ack_body)
                 .send()
